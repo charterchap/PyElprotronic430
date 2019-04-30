@@ -79,18 +79,20 @@ class PyElprotronic430(Client64, metaclass=Singleton):
         info = self.getAllDeviceInfo()
         log.debug(info)
 
+        segment_size = self.F_Get_Sector_Size(address)
+
         info_end_address = info['DEVICE_INFO_START_ADDR'] + \
             (info['DEVICE_INFO_SEGM_SIZE'] * info['DEVICE_NO_INFO_SEGMENTS'])
 
         if( info['DEVICE_MAIN_FLASH_START_ADDR'] <= address <= info['DEVICE_MAIN_FLASH_END_ADDR'] and
            info['DEVICE_MAIN_FLASH_START_ADDR'] <= address + len(data) <= info['DEVICE_MAIN_FLASH_END_ADDR']):
-            segment_size = self.F_Get_Sector_Size(address)
+
             start = info['DEVICE_MAIN_FLASH_START_ADDR']
             end = info['DEVICE_MAIN_FLASH_END_ADDR']
 
         elif( info['DEVICE_INFO_START_ADDR'] <= address <=  info_end_address and
              info['DEVICE_INFO_START_ADDR'] <= address + len(data) <= info_end_address):
-            segment_size = info['DEVICE_INFO_SEGM_SIZE']
+
             start = info['DEVICE_INFO_START_ADDR']
             end = info_end_address
         else:
@@ -102,7 +104,7 @@ class PyElprotronic430(Client64, metaclass=Singleton):
         # for x in all_starting_segments:
         #     print("0x%4X" % x)
 
-        first_seg_i = bisect.bisect_left(all_starting_segments, address)
+        first_seg_i = bisect.bisect_right(all_starting_segments, address) - 1
         last_seg_i = bisect.bisect_left(all_starting_segments, address + len(data))
 
         log.debug("First seg address %04x:" % all_starting_segments[first_seg_i])
@@ -114,6 +116,8 @@ class PyElprotronic430(Client64, metaclass=Singleton):
         readdata = self.F_Memory_Read_Data(all_starting_segments[first_seg_i], size)
         print("Initial Data Read: (len %d)" % len(readdata))
         self.dump_mem(readdata, all_starting_segments[first_seg_i])
+        if len(readdata) < size:
+            raise Exception('failed to retrieve initial data')
 
         offset = address - all_starting_segments[first_seg_i]
 
@@ -126,13 +130,17 @@ class PyElprotronic430(Client64, metaclass=Singleton):
             a = s * segment_size
             b = (s+1) * segment_size
 
-            print("Erasing Segment at %04x:" % seg_add)
+            print("----------------------------------------------------------")
+            print("Erasing Segment at %04x." % seg_add)
+            print("Also Erasing Segment at %04x." % (seg_add + segment_size//2))
             r = self.F_Segment_Erase(seg_add)
+            # I don't understand why this is needed
+            r |= self.F_Segment_Erase((seg_add + segment_size//2))
             if r != 1: raise Exception("Erase Failed: %s" % R[r])
 
-            blankcheck = self.F_Memory_Read_Data(seg_add, segment_size)
-            print("Blank Check:")
-            self.dump_mem(blankcheck, seg_add)
+            # # blankcheck = self.F_Memory_Read_Data(seg_add, segment_size)
+            # # print("Blank Check:")
+            # # self.dump_mem(blankcheck, seg_add)
 
             r = self.F_Sectors_Blank_Check(seg_add, seg_add+segment_size-1)
             if r != 1: raise Exception("Blank Check Failed: erase failed")
@@ -143,22 +151,24 @@ class PyElprotronic430(Client64, metaclass=Singleton):
             if r != 1: raise Exception("Write failed")
 
             verifydata = self.F_Memory_Read_Data(seg_add, segment_size)
+            print("Verify:")
+            self.dump_mem(verifydata, seg_add)
             if verifydata != data_to_write[a:b]:
                 log.warning("Soft fail, verify failed at 0x%02X" % seg_add)
 
+            print("Completed write %d of %d" % (s+1,len(all_starting_segments[first_seg_i:last_seg_i])))
 
 
     def dump_mem(self, byte_array, start_addr=None):
         """
         super simple hex dump thing
         """
-        for chunk in zip_longest(*[iter(byte_array)]*16, fillvalue=(0x0)):
-        # for chunk in zip(*[iter(byte_array)]*16):
+        for chunk in zip_longest(*[iter(byte_array)]*16, fillvalue=(0x00)):
 
-            if not any(chunk):
-                # skip anything that is all zeros
-                # pass
-                continue
+            # if not any(chunk):
+                  # start_addr += 16
+            #     # skip anything that is all zeros
+            #     continue
 
             if start_addr is not None:
                 print("@%05X | " % start_addr, end="")
@@ -186,12 +196,13 @@ if __name__ == "__main__":
 
     print("Power on?: %s." % (R[elpro.F_Power_Target(True)]))
     time.sleep(.2)
+    print("open target?: %s" % elpro.F_Open_Target_Device())
 
     device_info = elpro.getAllDeviceInfo()
     print(device_info)
 
     databuf = elpro.F_Memory_Read_Data(device_info["DEVICE_MAIN_FLASH_START_ADDR"], 512*2)
-    dump_mem(databuf)
+    elpro.dump_mem(databuf)
 
     print(elpro.F_Read_Word(0x3100))
 
@@ -200,6 +211,6 @@ if __name__ == "__main__":
     print("sector size %d" % elpro.F_Get_Sector_Size(0x8000))
 
     memdump = elpro.F_Memory_Read(device_info["DEVICE_MAIN_FLASH_END_ADDR"])
-    dump_mem(memdump)
+    elpro.dump_mem(memdump)
 
     r = elpro.F_Close_All()
